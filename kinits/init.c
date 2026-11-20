@@ -95,22 +95,24 @@ void get_module_options(const char *mod_name, char *options, size_t max_len) {
             char norm_mod_line[128];
             snprintf(norm_mod_line, sizeof(norm_mod_line), "%s", mod_in_line);
             for (int i = 0; norm_mod_line[i]; i++) if (norm_mod_line[i] == '_') norm_mod_line[i] = '-';
-
             if (strcmp(norm_mod_line, norm_mod) == 0) {
                 char *args = ptr + strlen(mod_in_line);
                 while (*args == ' ' || *args == '\t') args++;
                 if (*args) {
-                    snprintf(options, max_len, "%s", args);
+                    size_t cur_len = strlen(options);
+                    if (cur_len > 0 && cur_len < max_len - 1) {
+                        snprintf(options + cur_len, max_len - cur_len, " %s", args);
+                    } else {
+                        snprintf(options, max_len, "%s", args);
+                    }
                 }
-                fclose(conf);
-                closedir(dir);
-                return;
             }
         }
         fclose(conf);
     }
     closedir(dir);
 }
+
 
 void load_kernel_module_file(const char *full_path, const char *mod_name) {
     if (is_loaded(mod_name)) return;
@@ -295,9 +297,13 @@ pid_t spawn_shell(const char *tty_path) {
     pid_t pid = fork();
     if (pid == 0) {
         setsid();
+        signal(SIGINT, SIG_DFL);
+        signal(SIGTERM, SIG_DFL);
+        signal(SIGCHLD, SIG_DFL);
         int fd = open(tty_path, O_RDWR);
         if (fd >= 0) {
             ioctl(fd, TIOCSCTTY, 0);
+            tcsetpgrp(fd, getpid()); // Привязываем терминал для Ctrl+C
             dup2(fd, 0); dup2(fd, 1); dup2(fd, 2);
             if (fd > 2) close(fd);
         } else { _exit(1); }

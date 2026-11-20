@@ -196,25 +196,42 @@ char *kwash_read_line(void) {
 }
 
 char **kwash_split_line(char *line) {
-    int bufsize = 128;
-    int position = 0;
+    int bufsize = 128, pos = 0;
     char **tokens = malloc(bufsize * sizeof(char*));
-    char *token;
+    char *p = line;
 
-    if (!tokens) { fprintf(stderr, "kwash: malloc error\n"); exit(EXIT_FAILURE); }
+    while (*p) {
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (!*p || *p == '#') break;
 
-    token = strtok(line, " \t\r\n\a");
-    while (token != NULL) {
-        tokens[position++] = token;
-        if (position >= bufsize) {
+        char *dst = p;
+        tokens[pos++] = dst;
+        char quote = 0;
+
+        while (*p) {
+            if (!quote && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+                p++; break;
+            }
+            if (!quote && (*p == '"' || *p == '\'')) {
+                quote = *p++;
+            } else if (quote && *p == quote) {
+                quote = 0; p++;
+            } else {
+                *dst++ = *p++;
+            }
+        }
+        *dst = '\0';
+
+        // Оставляем запас в 2 слота под "--color=auto" и NULL
+        if (pos + 2 >= bufsize) {
             bufsize += 128;
             tokens = realloc(tokens, bufsize * sizeof(char*));
         }
-        token = strtok(NULL, " \t\r\n\a");
     }
-    tokens[position] = NULL;
+    tokens[pos] = NULL;
     return tokens;
 }
+
 
 void kwash_loop(void) {
     char *line;
