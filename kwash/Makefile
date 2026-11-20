@@ -1,5 +1,3 @@
-# Динамический подбор компилятора (как в основном скрипте build):
-# не на всех системах есть именно gcc.
 CC ?= $(shell for c in cc gcc gcc-15 gcc-14 gcc-13 clang; do \
             if command -v $$c >/dev/null 2>&1 && \
                echo 'int main(void){return 0;}' | $$c -x c - -o /tmp/.kwash_cc_test 2>/dev/null; then \
