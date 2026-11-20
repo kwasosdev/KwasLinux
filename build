@@ -350,10 +350,23 @@ setup_libs() {
 
 build_system() {
     echo -e "${GREEN}[System] Building kinits (init)...${NC}"
-    cd kinits && make clean && make && cp init ../rootfs/init && cd ..
+    cd kinits && make clean && make && cd ..
+    # Проверяем, что init собрался и он именно статический ELF.
+    # Если в cpio попадёт динамически слинкованный бинарник или файл без +x,
+    # ядро не сможет его запустить (Kernel panic: Failed to execute /init, error -13).
+    if ! head -c 5 kinits/init | od -An -tx1 | grep -q '^ 7f 45 4c 46'; then
+        echo -e "${RED}[System] kinits/init отсутствует или это не ELF — сборка прервана.${NC}"
+        exit 1
+    fi
+    if ldd kinits/init 2>/dev/null | grep -qv 'not a dynamic'; then
+        echo -e "${RED}[System] kinits/init слинкован динамически (в initramfs нет ld.so) — сборка прервана.${NC}"
+        exit 1
+    fi
+    install -m 755 kinits/init rootfs/init
 
     echo -e "${GREEN}[System] Building kwash (shell)...${NC}"
-    cd kwash && make clean && make && cp kwash ../rootfs/bin/ && cd ..
+    cd kwash && make clean && make && cd ..
+    install -m 755 kwash/kwash rootfs/bin/kwash
 
     if [ -d "kutils" ]; then
         echo -e "${GREEN}[System] Building kutils...${NC}"
@@ -373,7 +386,16 @@ build_ramfs() {
     
     # Очистка от мусора
     rm -rf lib/modules/*/build lib/modules/*/source
-    
+
+    # Страховка: /init обязан существовать и быть исполняемым, иначе ядро
+    # упадёт с "Failed to execute /init (error -13)" → Kernel panic.
+    if [ ! -f init ]; then
+        echo -e "${RED}[Pack] В rootfs нет /init! Сначала выполните: ./build system${NC}"
+        exit 1
+    fi
+    chmod 755 init 2>/dev/null || true
+    chmod -R +x bin sbin usr/bin usr/sbin 2>/dev/null || true
+
     if [ ! -f etc/profile ]; then
         echo "PATH=/bin:/usr/bin:/sbin" > etc/profile
         echo 'PS1="\e[1;32m[\u@\h \w]\e[0m# "' >> etc/profile
