@@ -470,6 +470,11 @@ run_qemu() {
     exit $rc
 }
 
+clear_all() {
+    echo "clearing files"
+    rm -rf linux coreutils src nvidia-kmod-570.144 *.iso initramfs.cpio.gz  rootfs/usr/bin rootfs/usr/share rootfs/usr/libexec rootfs/lib/modules rootfs/bin/* rootfs/init kinits/init kwash/kwash kboot/efi/x86_64/kboot.efi 
+}
+
 case "$1" in
     fetch)    fetch_all ;;
     kernel)   build_kernel ;;
@@ -480,7 +485,8 @@ case "$1" in
     pack)     build_ramfs ;;
     iso)      build_iso ;;
     qemu|run) run_qemu ;;
-    all)
+    clear)    clear_all ;;
+    all) 
         build_kernel
         build_coreutils
         build_nvidia
