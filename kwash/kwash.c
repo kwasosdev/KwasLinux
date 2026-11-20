@@ -10,14 +10,12 @@
 
 #define KWASH_VERSION "0.1"
 
-// Прототипы встроенных команд
 int kwash_cd(char **args);
 int kwash_exit(char **args);
 int kwash_clear(char **args);
 int kwash_poweroff(char **args);
 int kwash_reboot(char **args);
 
-// Список встроенных команд и указатели на их функции
 char *builtin_str[] = { 
     "cd", 
     "exit", 
@@ -42,7 +40,7 @@ int kwash_num_builtins() {
 
 int kwash_cd(char **args) {
     if (args[1] == NULL) {
-        fprintf(stderr, "kwash: ожидается аргумент для \"cd\"\n");
+        fprintf(stderr, "kwash: waiting argument for \"cd\"\n");
     } else {
         if (chdir(args[1]) != 0) perror("kwash");
     }
