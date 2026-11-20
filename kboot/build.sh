@@ -29,7 +29,7 @@ if [ "$ACTION" == "iso" ]; then
     mcopy -i iso_root/efi.img efi/x86_64/kboot.efi ::/EFI/BOOT/BOOTX64.EFI
     mcopy -i iso_root/efi.img ../linux/arch/x86/boot/bzImage ::/bzImage
     mcopy -i iso_root/efi.img ../initramfs.cpio.gz ::/initramfs.cpio.gz
-    mcopy -i iso_root/efi.img kboot.conf ::/kboot.conf
+    mcopy -i iso_root/efi.img kboot.conf ::/EFI/BOOT/kboot.conf
 
     echo "Running xorriso..."
     xorriso -as mkisofs \
