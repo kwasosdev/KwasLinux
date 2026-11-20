@@ -410,64 +410,8 @@ build_ramfs() {
 
 build_iso() {
     echo -e "${GREEN}[ISO] Building bootable ISO...${NC}"
-    cd kboot
-    chmod +x build.sh
-    ./build.sh iso
-    cd ..
-}
-
-run_qemu() {
-    echo -e "${BLUE}=== Running Kwasik in QEMU ===${NC}"
-    if [ ! -f "kwaslinux.iso" ]; then
-        echo -e "${RED}[QEMU] kwaslinux.iso не найден. Сначала соберите: ./build iso${NC}"
-        exit 1
-    fi
-
-    local OVMF_CODE="" OVMF_VARS="" cand
-    for cand in ./OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.fd; do
-        [ -f "$cand" ] && { OVMF_CODE="$cand"; break; }
-    done
-    for cand in ./OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/ovmf/OVMF_VARS.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.fd; do
-        [ -f "$cand" ] && { OVMF_VARS="$cand"; break; }
-    done
-
-    if [ -z "$OVMF_CODE" ] || [ -z "$OVMF_VARS" ]; then
-        echo -e "${RED}[QEMU] OVMF не найден.${NC}"
-        exit 1
-    fi
-
-    local ACCEL_ARGS="-cpu qemu64"
-    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-        ACCEL_ARGS="-enable-kvm -cpu host"
-    else
-        echo -e "${BLUE}[QEMU] KVM недоступен → TCG (медленно)${NC}"
-    fi
-
-    local TMP_VARS=$(mktemp /tmp/kwasik_OVMF_VARS.XXXXXX.fd)
-    cp "$OVMF_VARS" "$TMP_VARS"
-
-    local DISPLAY_ARGS
-    if [ "${KWASIK_HEADLESS:-0}" = "1" ] || { [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ] && [ ! -d /mnt/wslg ]; }; then
-        DISPLAY_ARGS="-nographic"
-        echo -e "${BLUE}[QEMU] Headless: serial → терминал. Выход: Ctrl+A, затем X.${NC}"
-    else
-        DISPLAY_ARGS="-serial mon:stdio"
-    fi
-
-    set +e
-    qemu-system-x86_64 \
-        $ACCEL_ARGS \
-        -m 4G \
-        -smp 4 \
-        -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
-        -drive if=pflash,format=raw,file="$TMP_VARS" \
-        -cdrom kwaslinux.iso \
-        -boot d \
-        $DISPLAY_ARGS
-    local rc=$?
-    set -e
-    rm -f "$TMP_VARS"
-    exit $rc
+    chmod +x buildiso.sh
+    ./buildiso.sh
 }
 
 clear_all() {
@@ -484,7 +428,6 @@ case "$1" in
     libs)     setup_libs ;;
     pack)     build_ramfs ;;
     iso)      build_iso ;;
-    qemu|run) run_qemu ;;
     clear)    clear_all ;;
     all) 
         build_kernel
@@ -496,5 +439,5 @@ case "$1" in
         build_iso
         echo -e "${GREEN}=== Build completed! ===${NC}"
         ;;
-    *) echo "Usage: $0 {fetch|all|kernel|utils|nvidia|system|libs|pack|iso|qemu|run}" ;;
+    *) echo "Usage: $0 {fetch|all|kernel|utils|nvidia|system|libs|pack|iso|clear}" ;;
 esac
