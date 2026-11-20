@@ -262,10 +262,29 @@ build_nvidia() {
         mv "NVIDIA-Linux-x86_64-${NVIDIA_VER}" "$EXTRACT_DIR"
     fi
 
+    # Подбираем C-компилятор: gcc-14 может отсутствовать в системе,
+    # тогда берём обычный gcc (или $CC из окружения).
+    local NVIDIA_CC="${CC:-}"
+    if [ -z "$NVIDIA_CC" ]; then
+        for c in gcc-14 gcc-13 gcc-12 gcc clang; do
+            if command -v "$c" >/dev/null 2>&1 && \
+               echo 'int main(void){return 0;}' | "$c" -x c - -o /tmp/.kwas_cc_test 2>/dev/null; then
+                NVIDIA_CC="$c"
+                break
+            fi
+        done
+        rm -f /tmp/.kwas_cc_test
+    fi
+    if [ -z "$NVIDIA_CC" ]; then
+        echo -e "${RED}[NVIDIA] No working C compiler found (tried gcc-14/gcc/clang). Install build-essential.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}[NVIDIA] Using C compiler: $NVIDIA_CC${NC}"
+
     echo -e "${GREEN}[NVIDIA] Compiling kernel modules...${NC}"
     make -C "$EXTRACT_DIR/kernel" \
         modules \
-        CC=gcc-14 \
+        CC="$NVIDIA_CC" \
         KCFLAGS="-Wno-error=attributes" \
         SYSSRC="$KERNEL_TREE" \
         SYSOUT="$KERNEL_TREE" \
