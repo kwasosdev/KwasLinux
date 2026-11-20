@@ -1,0 +1,370 @@
+#!/bin/bash
+set -e
+
+export PATH=$PATH:/sbin:/usr/sbin
+
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+KERNEL_VER="6.12.116"
+COREUTILS_VER="9.7"
+NVIDIA_VER="570.144"
+SRC_DIR="src"
+
+REPO_URL="https://arch.kwaslinux.netcraze.pro/"
+
+echo -e "${BLUE}=== Kwas GNU/Linux Build Script ===${NC}"
+
+fetch_all() {
+    echo -e "${BLUE}=== Fetching everything from Kwasik Server ===${NC}"
+    mkdir -p "$SRC_DIR"
+
+    local pkgs=("kboot-0.1.kpkg" "kinits-0.1.kpkg" "kwash-0.1.kpkg" "linux-firmware.kpkg")
+    for pkg in "${pkgs[@]}"; do
+        echo -e "${GREEN}[Fetch] Downloading $pkg...${NC}"
+        if wget -q --show-progress -O "/tmp/$pkg" "$REPO_URL/$pkg"; then
+            mkdir -p "/tmp/kpkg_extract"
+            tar -xf "/tmp/$pkg" -C "/tmp/kpkg_extract"
+            
+            local install_path="rootfs"
+            if [ -f "/tmp/kpkg_extract/about.txt" ]; then
+                local parsed_path=$(grep '^INSTALL_PATH=' "/tmp/kpkg_extract/about.txt" | cut -d'"' -f2)
+                if [ -n "$parsed_path" ]; then install_path="$parsed_path"; fi
+            fi
+            
+            if [ "$install_path" = "project_root" ]; then
+                cp -a "/tmp/kpkg_extract/data/." .
+                echo -e "${GREEN}[Fetch] $pkg installed to PROJECT ROOT.${NC}"
+            else
+                mkdir -p rootfs
+                cp -a "/tmp/kpkg_extract/data/." rootfs/
+                echo -e "${GREEN}[Fetch] $pkg installed to ROOTFS.${NC}"
+            fi
+            
+            rm -rf "/tmp/$pkg" "/tmp/kpkg_extract"
+        else
+            echo -e "${RED}[Fetch] Failed to download $pkg.${NC}"
+        fi
+    done
+
+    echo -e "${GREEN}[Fetch] Downloading sources (linux, coreutils)...${NC}"
+    if [ ! -f "$SRC_DIR/linux-${KERNEL_VER}.tar.xz" ]; then
+        wget -q --show-progress -O "$SRC_DIR/linux-${KERNEL_VER}.tar.xz" "$REPO_URL/linux"
+    fi
+    if [ ! -f "$SRC_DIR/coreutils-${COREUTILS_VER}.tar.xz" ]; then
+        wget -q --show-progress -O "$SRC_DIR/coreutils-${COREUTILS_VER}.tar.xz" "$REPO_URL/coreutils"
+    fi
+    
+    echo -e "${GREEN}[Fetch] All files downloaded successfully!${NC}"
+}
+
+build_kernel() {
+    mkdir -p "$SRC_DIR"
+    local kernel_tar="$SRC_DIR/linux-${KERNEL_VER}.kpkg"
+
+    if [ ! -f "$kernel_tar" ]; then
+        echo -e "${GREEN}[Kernel] Downloading from Kwasik Server...${NC}"
+        if ! wget -q --show-progress -O "$kernel_tar" "$REPO_URL/linux.kpkg"; then
+            echo -e "${RED}[Kernel] Server unavailable, falling back to kernel.org...${NC}"
+            wget -q --show-progress -P "$SRC_DIR" https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VER}.tar.xz
+        fi
+    fi
+
+    if [ ! -f "linux/Makefile" ]; then
+        rm -rf linux && mkdir -p linux
+        tar -xf "$kernel_tar" -C linux --strip-components=1
+    fi
+
+    if [ ! -f "linux/arch/x86/boot/bzImage" ]; then
+        cd linux
+        if [ ! -f ".config" ]; then 
+            if [ -f "../configs/kwasik_defconfig" ]; then
+                echo -e "${GREEN}[Kernel] Applying custom kwasik_defconfig...${NC}"
+                cp ../configs/kwasik_defconfig .config
+                make olddefconfig 
+            else
+                echo -e "${BLUE}[Kernel] No custom config found, using default...${NC}"
+                make defconfig
+            fi
+        fi
+        make -j$(nproc)
+        cd ..
+    fi
+
+    echo -e "${GREEN}[Kernel] Installing modules to rootfs...${NC}"
+    local KVER=$(make -s kernelrelease -C linux)
+
+    cd linux
+    make -s modules_install INSTALL_MOD_PATH=../rootfs
+    cd ..
+
+    echo -e "${GREEN}[Kernel] Stripping debug info...${NC}"
+    find rootfs/lib/modules -name "*.ko" -exec strip --strip-debug {} \; 2>/dev/null || true
+
+    echo -e "${GREEN}[Kernel] Generating modules.dep...${NC}"
+    depmod -b rootfs "$KVER"
+}
+
+build_coreutils() {
+    mkdir -p "$SRC_DIR"
+    local coreutils_tar="$SRC_DIR/coreutils-${COREUTILS_VER}.tar.xz"
+
+    local CC_STD="gnu2x"
+    if echo 'int main(void){return 0;}' | gcc -std=gnu23 -fsyntax-only -x c - 2>/dev/null; then
+        CC_STD="gnu23"
+    fi
+    local CO_CFLAGS="-O2 -std=$CC_STD"
+    echo -e "${GREEN}[Coreutils] Using CFLAGS='$CO_CFLAGS'${NC}"
+
+    if [ ! -f "$coreutils_tar" ]; then
+        echo -e "${GREEN}[Coreutils] Downloading from Kwasik Server...${NC}"
+        if ! wget -q --show-progress -O "$coreutils_tar" "$REPO_URL/coreutils.kpkg"; then
+            echo -e "${RED}[Coreutils] Server unavailable, falling back to ftp.gnu.org...${NC}"
+            wget -q --show-progress -P "$SRC_DIR" https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VER}.tar.xz
+        fi
+    fi
+
+    if [ ! -f "coreutils/configure" ] || ! grep -q -- "-std=$CC_STD" coreutils/Makefile 2>/dev/null; then
+        rm -rf coreutils && mkdir -p coreutils
+        tar -xf "$coreutils_tar" -C coreutils --strip-components=1
+        cd coreutils
+        CFLAGS="$CO_CFLAGS" ./configure --prefix=/usr
+        cd ..
+    fi
+
+    echo -e "${GREEN}[Coreutils] Compiling...${NC}"
+    cd coreutils
+    make -j$(nproc) CFLAGS="$CO_CFLAGS" MAKEINFO=true
+    make install DESTDIR=$PWD/../rootfs
+    cd ..
+}
+
+build_nvidia() {
+    echo -e "${BLUE}=== Building NVIDIA Kernel Modules ${NVIDIA_VER} ===${NC}"
+    local NVIDIA_RUN="NVIDIA-Linux-x86_64-${NVIDIA_VER}.run"
+    local NVIDIA_TAR="$SRC_DIR/$NVIDIA_RUN"
+    local EXTRACT_DIR="nvidia-kmod-${NVIDIA_VER}"
+    local KERNEL_TREE="$PWD/linux"
+
+    mkdir -p "$SRC_DIR"
+
+    if [ ! -f "$KERNEL_TREE/Module.symvers" ]; then
+        echo -e "${RED}[NVIDIA] Kernel tree not built. Run 'kernel' target first.${NC}"
+        exit 1
+    fi
+
+    if [ ! -f "$NVIDIA_TAR" ]; then
+        echo "Downloading NVIDIA driver ${NVIDIA_VER} from Kwasik Server..."
+        if ! wget -q --show-progress -O "${NVIDIA_TAR}.tmp" "$REPO_URL/$NVIDIA_RUN"; then
+            echo -e "${RED}[NVIDIA] Server unavailable, falling back to nvidia.com...${NC}"
+            rm -f "${NVIDIA_TAR}.tmp"
+            wget -q --show-progress -O "$NVIDIA_TAR" \
+                "https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VER}/${NVIDIA_RUN}"
+        else
+            mv "${NVIDIA_TAR}.tmp" "$NVIDIA_TAR"
+        fi
+    fi
+
+    # Проверка, что файл не пустой
+    if [ ! -s "$NVIDIA_TAR" ]; then
+        echo -e "${RED}[NVIDIA] Downloaded file is empty!${NC}"
+        exit 1
+    fi
+
+    if [ ! -d "$EXTRACT_DIR" ]; then
+        echo "Extracting kernel modules..."
+        sh "$NVIDIA_TAR" --extract-only
+        mv "NVIDIA-Linux-x86_64-${NVIDIA_VER}" "$EXTRACT_DIR"
+    fi
+
+    echo -e "${GREEN}[NVIDIA] Compiling kernel modules...${NC}"
+    make -C "$EXTRACT_DIR/kernel" \
+        modules \
+        CC=gcc-14 \
+        KCFLAGS="-Wno-error=attributes" \
+        SYSSRC="$KERNEL_TREE" \
+        SYSOUT="$KERNEL_TREE" \
+        IGNORE_CC_MISMATCH=1 \
+        IGNORE_XEN_PRESENCE=1 \
+        IGNORE_PREEMPT_RT_PRESENCE=1 \
+        -j$(nproc)
+
+    echo -e "${GREEN}[NVIDIA] Installing modules to rootfs...${NC}"
+    local KVER=$(make -s kernelrelease -C "$KERNEL_TREE")
+    local MOD_DEST="$PWD/rootfs/lib/modules/$KVER/kernel/drivers/video"
+    mkdir -p "$MOD_DEST"
+
+    for ko in "$EXTRACT_DIR"/kernel/*.ko; do
+        if [ -f "$ko" ]; then cp -v "$ko" "$MOD_DEST/"; fi
+    done
+
+    echo -e "${GREEN}[NVIDIA] Running depmod...${NC}"
+    depmod -b rootfs "$KVER"
+}
+
+setup_libs() {
+    echo -e "${GREEN}[Libs] Copying system libraries...${NC}"
+    cd rootfs
+    
+    rm -rf lib/x86_64-linux-gnu usr/lib/x86_64-linux-gnu
+    rm -f lib/libc.so.6 usr/lib/libc.so.6 lib64/ld-linux-x86-64.so.2
+    
+    mkdir -p lib lib64 usr/lib lib/x86_64-linux-gnu usr/lib/x86_64-linux-gnu
+
+    # Копируем ld-linux (с флагом -L, чтобы скопировать сам файл, а не симлинк)
+    local ld_path=""
+    for path in /lib64/ld-linux-x86-64.so.2 /usr/lib64/ld-linux-x86-64.so.2 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2; do
+        if [ -f "$path" ]; then ld_path="$path"; break; fi
+    done
+    if [ -n "$ld_path" ]; then 
+        cp -aLf "$ld_path" lib64/ 
+    fi
+
+    # Копируем libc.so.6 (тоже с -L)
+    local libc_path=""
+    for path in /lib/x86_64-linux-gnu/libc.so.6 /usr/lib/x86_64-linux-gnu/libc.so.6 /lib/libc.so.6; do
+        if [ -f "$path" ]; then libc_path="$path"; break; fi
+    done
+    if [ -n "$libc_path" ]; then
+        cp -aLf "$libc_path" lib/x86_64-linux-gnu/
+        cp -aLf "$libc_path" lib/
+        cp -aLf "$libc_path" usr/lib/
+    fi
+
+    # Копируем libcap.so.2
+    for path in /lib/x86_64-linux-gnu/libcap.so.2 /usr/lib/x86_64-linux-gnu/libcap.so.2 /lib/libcap.so.2; do
+        if [ -f "$path" ]; then
+            cp -aLf "$path" lib/x86_64-linux-gnu/ 2>/dev/null || true
+            cp -aLf "$path" lib/ 2>/dev/null || true
+            cp -aLf "$path" usr/lib/ 2>/dev/null || true
+            break
+        fi
+    done
+
+    cd ..
+}
+
+build_system() {
+    echo -e "${GREEN}[System] Building kinits (init)...${NC}"
+    cd kinits && make clean && make && cp init ../rootfs/init && cd ..
+
+    echo -e "${GREEN}[System] Building kwash (shell)...${NC}"
+    cd kwash && make clean && make && cp kwash ../rootfs/bin/ && cd ..
+
+    if [ -d "kutils" ]; then
+        echo -e "${GREEN}[System] Building kutils...${NC}"
+        cd kutils
+        make clean || true
+        make
+        find . -maxdepth 1 -type f -executable -exec cp -v {} ../rootfs/bin/ \;
+        cd ..
+    else
+        echo -e "${BLUE}[System] Папка kutils не найдена, пропускаем.${NC}"
+    fi
+}
+
+build_ramfs() {
+    echo -e "${GREEN}[Pack] Packing initramfs...${NC}"
+    cd rootfs
+    
+    # Очистка от мусора
+    rm -rf lib/modules/*/build lib/modules/*/source
+    
+    if [ ! -f etc/profile ]; then
+        echo "PATH=/bin:/usr/bin:/sbin" > etc/profile
+        echo 'PS1="\e[1;32m[\u@\h \w]\e[0m# "' >> etc/profile
+    fi
+
+    # ИСПОЛЬЗУЕМ fakeroot: cpio будет уверен, что файлы принадлежат root
+    echo "Packing with fakeroot to set root:root ownership..."
+    find . | fakeroot cpio -o -H newc | gzip > ../initramfs.cpio.gz
+    
+    cd ..
+}
+
+build_iso() {
+    echo -e "${GREEN}[ISO] Building bootable ISO...${NC}"
+    cd kboot
+    chmod +x build.sh
+    ./build.sh iso
+    cd ..
+}
+
+run_qemu() {
+    echo -e "${BLUE}=== Running Kwasik in QEMU ===${NC}"
+    if [ ! -f "kwaslinux.iso" ]; then
+        echo -e "${RED}[QEMU] kwaslinux.iso не найден. Сначала соберите: ./build iso${NC}"
+        exit 1
+    fi
+
+    local OVMF_CODE="" OVMF_VARS="" cand
+    for cand in ./OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE.fd /usr/share/ovmf/OVMF_CODE.fd /usr/share/edk2-ovmf/x64/OVMF_CODE.fd; do
+        [ -f "$cand" ] && { OVMF_CODE="$cand"; break; }
+    done
+    for cand in ./OVMF_VARS.fd /usr/share/OVMF/OVMF_VARS.fd /usr/share/ovmf/OVMF_VARS.fd /usr/share/edk2-ovmf/x64/OVMF_VARS.fd; do
+        [ -f "$cand" ] && { OVMF_VARS="$cand"; break; }
+    done
+
+    if [ -z "$OVMF_CODE" ] || [ -z "$OVMF_VARS" ]; then
+        echo -e "${RED}[QEMU] OVMF не найден.${NC}"
+        exit 1
+    fi
+
+    local ACCEL_ARGS="-cpu qemu64"
+    if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+        ACCEL_ARGS="-enable-kvm -cpu host"
+    else
+        echo -e "${BLUE}[QEMU] KVM недоступен → TCG (медленно)${NC}"
+    fi
+
+    local TMP_VARS=$(mktemp /tmp/kwasik_OVMF_VARS.XXXXXX.fd)
+    cp "$OVMF_VARS" "$TMP_VARS"
+
+    local DISPLAY_ARGS
+    if [ "${KWASIK_HEADLESS:-0}" = "1" ] || { [ -z "$DISPLAY" ] && [ -z "$WAYLAND_DISPLAY" ] && [ ! -d /mnt/wslg ]; }; then
+        DISPLAY_ARGS="-nographic"
+        echo -e "${BLUE}[QEMU] Headless: serial → терминал. Выход: Ctrl+A, затем X.${NC}"
+    else
+        DISPLAY_ARGS="-serial mon:stdio"
+    fi
+
+    set +e
+    qemu-system-x86_64 \
+        $ACCEL_ARGS \
+        -m 4G \
+        -smp 4 \
+        -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+        -drive if=pflash,format=raw,file="$TMP_VARS" \
+        -cdrom kwaslinux.iso \
+        -boot d \
+        $DISPLAY_ARGS
+    local rc=$?
+    set -e
+    rm -f "$TMP_VARS"
+    exit $rc
+}
+
+case "$1" in
+    fetch)    fetch_all ;;
+    kernel)   build_kernel ;;
+    utils)    build_coreutils ;;
+    nvidia)   build_nvidia ;;
+    system)   build_system ;;
+    libs)     setup_libs ;;
+    pack)     build_ramfs ;;
+    iso)      build_iso ;;
+    qemu|run) run_qemu ;;
+    all)
+        build_kernel
+        build_coreutils
+        build_nvidia
+        setup_libs
+        build_system
+        build_ramfs
+        build_iso
+        echo -e "${GREEN}=== Build completed! ===${NC}"
+        ;;
+    *) echo "Usage: $0 {fetch|all|kernel|utils|nvidia|system|libs|pack|iso|qemu|run}" ;;
+esac
