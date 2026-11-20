@@ -15,6 +15,45 @@ SRC_DIR="src"
 
 REPO_URL="https://arch.kwaslinux.netcraze.pro/"
 
+# Скачивает файл и проверяет, что это действительно архив/образ, а не HTML-заглушка
+# (сервер Kwasik при недоступности отдаёт страницу-заглушку с кодом 424,
+#  wget без --server-response считает такую загрузку успешной).
+download_valid() {
+    local url="$1" out="$2" validator="$3"
+    rm -f "$out"
+    if ! wget -q --show-progress -O "$out" "$url"; then
+        rm -f "$out"
+        return 1
+    fi
+    if ! $validator "$out"; then
+        echo -e "${RED}[Download] '$url' is not a valid archive (got junk/HTML), discarding.${NC}"
+        rm -f "$out"
+        return 1
+    fi
+    return 0
+}
+
+is_tar_archive() {
+    # Проверяет сигнатуру gzip/xz/zstd в начале файла или корректный tar-магический номер
+    local f="$1"
+    [ -s "$f" ] || return 1
+    case "$(head -c 6 "$f" | od -An -tx1 | tr -d ' \n')" in
+        1f8b*)                      return 0 ;;  # gzip (.tar.gz / .cpio.gz)
+        fd377a585a00)               return 0 ;;  # xz (.tar.xz)
+        28b52ffd*)                  return 0 ;;  # zstd
+    esac
+    head -c 512 "$f" | dd bs=1 skip=257 count=5 status=none | grep -q ustar
+}
+
+is_executable_or_iso() {
+    # Для .run-инсталляторов NVIDIA: это ELF-бинарник либо ISO (сигнатура CD-ROM)
+    local f="$1"
+    [ -s "$f" ] || return 1
+    head -c 4 "$f" | od -An -tx1 | tr -d ' \n' | grep -q '^7f454c46' && return 0  # ELF
+    tail -c +32769 "$f" 2>/dev/null | head -c 5 | grep -q 'CD001' && return 0      # ISO9660
+    return 1
+}
+
 echo -e "${BLUE}=== Kwas GNU/Linux Build Script ===${NC}"
 
 fetch_all() {
@@ -24,7 +63,7 @@ fetch_all() {
     local pkgs=("kboot-0.1.kpkg" "kinits-0.1.kpkg" "kwash-0.1.kpkg" "linux-firmware.kpkg")
     for pkg in "${pkgs[@]}"; do
         echo -e "${GREEN}[Fetch] Downloading $pkg...${NC}"
-        if wget -q --show-progress -O "/tmp/$pkg" "$REPO_URL/$pkg"; then
+        if download_valid "$REPO_URL/$pkg" "/tmp/$pkg" is_tar_archive; then
             mkdir -p "/tmp/kpkg_extract"
             tar -xf "/tmp/$pkg" -C "/tmp/kpkg_extract"
             
@@ -51,10 +90,12 @@ fetch_all() {
 
     echo -e "${GREEN}[Fetch] Downloading sources (linux, coreutils)...${NC}"
     if [ ! -f "$SRC_DIR/linux-${KERNEL_VER}.tar.xz" ]; then
-        wget -q --show-progress -O "$SRC_DIR/linux-${KERNEL_VER}.tar.xz" "$REPO_URL/linux"
+        download_valid "$REPO_URL/linux" "$SRC_DIR/linux-${KERNEL_VER}.tar.xz" is_tar_archive || \
+            echo -e "${RED}[Fetch] Failed to download linux sources.${NC}"
     fi
     if [ ! -f "$SRC_DIR/coreutils-${COREUTILS_VER}.tar.xz" ]; then
-        wget -q --show-progress -O "$SRC_DIR/coreutils-${COREUTILS_VER}.tar.xz" "$REPO_URL/coreutils"
+        download_valid "$REPO_URL/coreutils" "$SRC_DIR/coreutils-${COREUTILS_VER}.tar.xz" is_tar_archive || \
+            echo -e "${RED}[Fetch] Failed to download coreutils sources.${NC}"
     fi
     
     echo -e "${GREEN}[Fetch] All files downloaded successfully!${NC}"
@@ -62,19 +103,40 @@ fetch_all() {
 
 build_kernel() {
     mkdir -p "$SRC_DIR"
-    local kernel_tar="$SRC_DIR/linux-${KERNEL_VER}.kpkg"
+    local kernel_src="$SRC_DIR/linux-${KERNEL_VER}.tar.xz"   # официальный исходник с kernel.org
+    local kernel_kpkg="$SRC_DIR/linux-${KERNEL_VER}.kpkg"    # пакет с сервера Kwasik (tar-архив)
 
-    if [ ! -f "$kernel_tar" ]; then
+    if [ ! -f "$kernel_src" ] && [ ! -f "$kernel_kpkg" ]; then
         echo -e "${GREEN}[Kernel] Downloading from Kwasik Server...${NC}"
-        if ! wget -q --show-progress -O "$kernel_tar" "$REPO_URL/linux.kpkg"; then
+        if ! download_valid "$REPO_URL/linux.kpkg" "$kernel_kpkg" is_tar_archive; then
             echo -e "${RED}[Kernel] Server unavailable, falling back to kernel.org...${NC}"
-            wget -q --show-progress -P "$SRC_DIR" https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VER}.tar.xz
+            download_valid "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VER}.tar.xz" \
+                "$kernel_src" is_tar_archive || \
+            download_valid "https://www.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VER}.tar.xz" \
+                "$kernel_src" is_tar_archive
         fi
+    fi
+
+    # Определяем, какой из загруженных файлов использовать
+    local archive=""
+    if [ -f "$kernel_kpkg" ] && is_tar_archive "$kernel_kpkg"; then
+        archive="$kernel_kpkg"
+    elif [ -f "$kernel_src" ] && is_tar_archive "$kernel_src"; then
+        archive="$kernel_src"
+    fi
+
+    if [ -z "$archive" ]; then
+        echo -e "${RED}[Kernel] No valid kernel archive found in $SRC_DIR (downloads failed).${NC}"
+        exit 1
     fi
 
     if [ ! -f "linux/Makefile" ]; then
         rm -rf linux && mkdir -p linux
-        tar -xf "$kernel_tar" -C linux --strip-components=1
+        if ! tar -xf "$archive" -C linux --strip-components=1; then
+            echo -e "${RED}[Kernel] Failed to extract '$archive' — file is not a valid tar archive.${NC}"
+            rm -rf linux
+            exit 1
+        fi
     fi
 
     if [ ! -f "linux/arch/x86/boot/bzImage" ]; then
@@ -118,17 +180,36 @@ build_coreutils() {
     local CO_CFLAGS="-O2 -std=$CC_STD"
     echo -e "${GREEN}[Coreutils] Using CFLAGS='$CO_CFLAGS'${NC}"
 
-    if [ ! -f "$coreutils_tar" ]; then
+    local coreutils_kpkg="$SRC_DIR/coreutils-${COREUTILS_VER}.kpkg"
+
+    if [ ! -f "$coreutils_tar" ] && [ ! -f "$coreutils_kpkg" ]; then
         echo -e "${GREEN}[Coreutils] Downloading from Kwasik Server...${NC}"
-        if ! wget -q --show-progress -O "$coreutils_tar" "$REPO_URL/coreutils.kpkg"; then
+        if ! download_valid "$REPO_URL/coreutils.kpkg" "$coreutils_kpkg" is_tar_archive; then
             echo -e "${RED}[Coreutils] Server unavailable, falling back to ftp.gnu.org...${NC}"
-            wget -q --show-progress -P "$SRC_DIR" https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VER}.tar.xz
+            download_valid "https://ftp.gnu.org/gnu/coreutils/coreutils-${COREUTILS_VER}.tar.xz" \
+                "$coreutils_tar" is_tar_archive
         fi
+    fi
+
+    local cu_archive=""
+    if [ -f "$coreutils_kpkg" ] && is_tar_archive "$coreutils_kpkg"; then
+        cu_archive="$coreutils_kpkg"
+    elif [ -f "$coreutils_tar" ] && is_tar_archive "$coreutils_tar"; then
+        cu_archive="$coreutils_tar"
+    fi
+
+    if [ -z "$cu_archive" ]; then
+        echo -e "${RED}[Coreutils] No valid coreutils archive found in $SRC_DIR (downloads failed).${NC}"
+        exit 1
     fi
 
     if [ ! -f "coreutils/configure" ] || ! grep -q -- "-std=$CC_STD" coreutils/Makefile 2>/dev/null; then
         rm -rf coreutils && mkdir -p coreutils
-        tar -xf "$coreutils_tar" -C coreutils --strip-components=1
+        if ! tar -xf "$cu_archive" -C coreutils --strip-components=1; then
+            echo -e "${RED}[Coreutils] Failed to extract '$cu_archive' — file is not a valid tar archive.${NC}"
+            rm -rf coreutils
+            exit 1
+        fi
         cd coreutils
         CFLAGS="$CO_CFLAGS" ./configure --prefix=/usr
         cd ..
@@ -155,21 +236,20 @@ build_nvidia() {
         exit 1
     fi
 
-    if [ ! -f "$NVIDIA_TAR" ]; then
+    if [ ! -f "$NVIDIA_TAR" ] || ! is_executable_or_iso "$NVIDIA_TAR"; then
+        rm -f "$NVIDIA_TAR"
         echo "Downloading NVIDIA driver ${NVIDIA_VER} from Kwasik Server..."
-        if ! wget -q --show-progress -O "${NVIDIA_TAR}.tmp" "$REPO_URL/$NVIDIA_RUN"; then
+        if ! download_valid "$REPO_URL/$NVIDIA_RUN" "$NVIDIA_TAR" is_executable_or_iso; then
             echo -e "${RED}[NVIDIA] Server unavailable, falling back to nvidia.com...${NC}"
-            rm -f "${NVIDIA_TAR}.tmp"
-            wget -q --show-progress -O "$NVIDIA_TAR" \
-                "https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VER}/${NVIDIA_RUN}"
-        else
-            mv "${NVIDIA_TAR}.tmp" "$NVIDIA_TAR"
+            download_valid \
+                "https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VER}/${NVIDIA_RUN}" \
+                "$NVIDIA_TAR" is_executable_or_iso
         fi
     fi
 
-    # Проверка, что файл не пустой
-    if [ ! -s "$NVIDIA_TAR" ]; then
-        echo -e "${RED}[NVIDIA] Downloaded file is empty!${NC}"
+    # Проверка, что файл скачан и это действительно инсталлятор
+    if [ ! -s "$NVIDIA_TAR" ] || ! is_executable_or_iso "$NVIDIA_TAR"; then
+        echo -e "${RED}[NVIDIA] Downloaded file is missing or invalid!${NC}"
         exit 1
     fi
 
