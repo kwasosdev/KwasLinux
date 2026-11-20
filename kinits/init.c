@@ -25,7 +25,6 @@ volatile sig_atomic_t reboot_requested = 0;
 char *loaded_modules[MAX_MODULES];
 int loaded_count = 0;
 
-// --- ПРОТОТИПЫ ФУНКЦИЙ ---
 void load_module_with_deps(const char *mod_name);
 
 void handle_sigchld(int sig) { (void)sig; while (waitpid(-1, NULL, WNOHANG) > 0); }
@@ -37,7 +36,6 @@ void handle_shutdown(int sig) {
 void log_msg(const char *msg) { printf("[" OS_NAME " init] %s\n", msg); fflush(stdout); }
 void mkdir_if_missing(const char *path) { if (mkdir(path, 0755) != 0 && errno != EEXIST) { } }
 
-// --- БАЗОВЫЕ ФУНКЦИИ МОДУЛЕЙ ---
 int is_loaded(const char *mod_name) {
     for (int i = 0; i < loaded_count; i++) {
         if (strcmp(loaded_modules[i], mod_name) == 0) return 1;
@@ -60,7 +58,6 @@ int wildcard_match(const char *pattern, const char *string) {
     return 0;
 }
 
-// --- ЧТЕНИЕ ПАРАМЕТРОВ ИЗ /etc/modprobe.d/ ---
 void get_module_options(const char *mod_name, char *options, size_t max_len) {
     options[0] = '\0';
     
@@ -145,7 +142,6 @@ void load_kernel_module_file(const char *full_path, const char *mod_name) {
     }
 }
 
-// --- РЕКУРСИВНАЯ ЗАГРУЗКА ЗАВИСИМОСТЕЙ ---
 void load_module_with_deps(const char *mod_name) {
     if (is_loaded(mod_name)) return;
 
@@ -159,9 +155,8 @@ void load_module_with_deps(const char *mod_name) {
 
     char line[1024];
     
-    // Делаем буферы чуть больше, чтобы GCC не ругался
     char normalized_mod[512];
-    char target_mod[sizeof(normalized_mod) + 4]; // +4 для ".ko" и '\0'
+    char target_mod[sizeof(normalized_mod) + 4];
     
     snprintf(normalized_mod, sizeof(normalized_mod), "%s", mod_name);
     for (int i = 0; normalized_mod[i]; i++) {
@@ -184,7 +179,7 @@ void load_module_with_deps(const char *mod_name) {
                     char *end = strchr(dep, ' ');
                     if (end) *end = '\0';
 
-                    char dep_name[600]; // Сделали больше
+                    char dep_name[600];
                     char *last_slash = strrchr(dep, '/');
                     if (last_slash) snprintf(dep_name, sizeof(dep_name), "%s", last_slash + 1);
                     else snprintf(dep_name, sizeof(dep_name), "%s", dep);
@@ -203,7 +198,6 @@ void load_module_with_deps(const char *mod_name) {
     fclose(file);
 }
 
-// --- УМНАЯ ЗАГРУЗКА ПО ЖЕЛЕЗУ ---
 void load_hardware_modules() {
     log_msg("Scanning hardware for required modules...");
     struct utsname un;
@@ -265,7 +259,6 @@ void load_hardware_modules() {
     log_msg("Hardware scan complete.");
 }
 
-// --- ОСТАЛЬНОЙ КОД ---
 void kill_all_processes() {
     DIR *dir = opendir("/proc");
     if (!dir) return;
