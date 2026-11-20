@@ -45,13 +45,16 @@ is_tar_archive() {
     head -c 512 "$f" | dd bs=1 skip=257 count=5 status=none | grep -q ustar
 }
 
-is_executable_or_iso() {
-    # Для .run-инсталляторов NVIDIA: это ELF-бинарник либо ISO (сигнатура CD-ROM)
+is_nvidia_run() {
+    # Инсталлятор NVIDIA .run — это shell-скрипт (начинается с "#!/"), в хвосте
+    # которого прилеплен self-extracting arhив. Проверяем shebang в начале файла,
+    # наличие внутри подписи "NVIDIA" и разумный размер (полный пакет ~358 МБ;
+    # HTML-заглушки/обрывки будут заметно меньше).
     local f="$1"
     [ -s "$f" ] || return 1
-    head -c 4 "$f" | od -An -tx1 | tr -d ' \n' | grep -q '^7f454c46' && return 0  # ELF
-    tail -c +32769 "$f" 2>/dev/null | head -c 5 | grep -q 'CD001' && return 0      # ISO9660
-    return 1
+    head -c 2 "$f" | grep -q '^#!' || return 1
+    LC_ALL=C grep -a -m1 -q 'NVIDIA' "$f" || return 1
+    [ "$(stat -c %s "$f")" -ge $((10 * 1024 * 1024)) ]
 }
 
 echo -e "${BLUE}=== Kwas GNU/Linux Build Script ===${NC}"
@@ -236,19 +239,19 @@ build_nvidia() {
         exit 1
     fi
 
-    if [ ! -f "$NVIDIA_TAR" ] || ! is_executable_or_iso "$NVIDIA_TAR"; then
+    if [ ! -f "$NVIDIA_TAR" ] || ! is_nvidia_run "$NVIDIA_TAR"; then
         rm -f "$NVIDIA_TAR"
         echo "Downloading NVIDIA driver ${NVIDIA_VER} from Kwasik Server..."
-        if ! download_valid "$REPO_URL/$NVIDIA_RUN" "$NVIDIA_TAR" is_executable_or_iso; then
+        if ! download_valid "$REPO_URL/$NVIDIA_RUN" "$NVIDIA_TAR" is_nvidia_run; then
             echo -e "${RED}[NVIDIA] Server unavailable, falling back to nvidia.com...${NC}"
             download_valid \
                 "https://us.download.nvidia.com/XFree86/Linux-x86_64/${NVIDIA_VER}/${NVIDIA_RUN}" \
-                "$NVIDIA_TAR" is_executable_or_iso
+                "$NVIDIA_TAR" is_nvidia_run
         fi
     fi
 
     # Проверка, что файл скачан и это действительно инсталлятор
-    if [ ! -s "$NVIDIA_TAR" ] || ! is_executable_or_iso "$NVIDIA_TAR"; then
+    if [ ! -s "$NVIDIA_TAR" ] || ! is_nvidia_run "$NVIDIA_TAR"; then
         echo -e "${RED}[NVIDIA] Downloaded file is missing or invalid!${NC}"
         exit 1
     fi
